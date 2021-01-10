@@ -1,0 +1,27 @@
+---
+id: mdx
+title: Embed example
+---
+import Message from '../src/components/Message';
+import ZypeCodePen from '../src/components/ZypeCodePen';
+import { MDXEmbedProvider } from 'mdx-embed';
+
+## Social settings
+### Player Sharing
+
+If you want to allow your videos to be shared you must turn Player Sharing Enabled on in [site settings](https://admin.zype.com/site/edit)
+
+Manual example of iframe
+
+<iframe height={300} style={{width: '100%'}} scrolling="no" title="Share video example" src="https://codepen.io/zypedocumentation/embed/poEaeQz?height=265&theme-id=dark&default-tab=html,result" frameBorder="no" loading="lazy" allowTransparency="true" allowFullScreen="true">
+                  See the Pen &lt;a href='https://codepen.io/zypedocumentation/pen/poEaeQz'&gt;Share video example&lt;/a&gt; by Zype Documentation
+                  (&lt;a href='https://codepen.io/zypedocumentation'&gt;@zypedocumentation&lt;/a&gt;) on &lt;a href='https://codepen.io'&gt;CodePen&lt;/a&gt;.
+                </iframe>
+
+<br /><br />
+Using an MDX React component
+
+<ZypeCodePen codePenId="poEaeQz" tabs={ ["html", "result"] } height="300" clickToLoad='true' theme='dark' />
+
+Another React example
+<Message />
