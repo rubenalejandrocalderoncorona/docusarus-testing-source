@@ -2,7 +2,7 @@
 
 This is an example of the Docusaurus v2 tool.
 
-### some useful URL links about this topic
+### Some useful URL links about this topic
 
 [Show case you websites using Docosaurus v2](https://v2.docusaurus.io/showcase/)
 
