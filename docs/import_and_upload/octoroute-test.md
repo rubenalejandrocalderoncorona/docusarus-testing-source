@@ -1,7 +1,7 @@
 ---
 id: sample-test-document
 title: Sample test document for Octoroute
-sidebar_position: 99
+sidebar_position: 4
 ---
 
 ## Description
@@ -36,8 +36,8 @@ echo "This is a test command"
 
 ## 4. References
 
-- [Octobus Documentation Home](../index.md)
-- [Octoroute FAQ](./octoroute-faq.md)
+- [Octobus Documentation Home](#)
+- [Octoroute FAQ](#)
 
 ## 5. Change history
 
