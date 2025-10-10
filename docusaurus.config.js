@@ -4,7 +4,11 @@ module.exports = {
   url: 'https://zype.com',
   baseUrl: '/',
   onBrokenLinks: 'throw',
-  onBrokenMarkdownLinks: 'warn',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
+  },
   favicon: 'img/favicon.png',
   organizationName: 'zype', // Usually your GitHub org/user name.
   projectName: 'zype', // Usually your repo name.
@@ -81,6 +85,9 @@ module.exports = {
         },
         blog: {
           showReadingTime: true,
+          // Add these two lines to suppress the new warnings
+          onInlineAuthors: 'ignore',
+          onUntruncatedBlogPosts: 'ignore',
         },
         theme: {
           customCss: require.resolve('./src/css/custom.css'),
