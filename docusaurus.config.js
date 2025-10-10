@@ -1,8 +1,10 @@
 module.exports = {
   title: 'Zype Docs',
   tagline: 'The Support Docs',
-  url: 'https://zype.com',
-  baseUrl: '/',
+  url: 'https://rubenalejandrocalderoncorona.github.io', // Your GitHub Pages URL
+  baseUrl: '/docusarus-testing-source/', // Your repository name
+  organizationName: 'rubenalejandrocalderoncorona', // Your GitHub username
+  projectName: 'docusarus-testing-source', // Your repository name
   onBrokenLinks: 'throw',
   markdown: {
     hooks: {
