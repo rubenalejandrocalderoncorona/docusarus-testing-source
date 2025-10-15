@@ -1,61 +1,302 @@
-name: Trigger Documentation Sync
+name: Sync Documentation from Octoroute (Local LLM)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'documentation/**'
+  repository_dispatch:
+    types: [docs-updated]
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Source repository (e.g., rubenalejandrocalderoncorona/testing-remote-docs)'
+        required: true
+        default: 'csie-ruben-test/Octoroute' # Default for manual dispatch
+      source_ref:
+        description: 'Source branch/commit'
+        required: true
+        default: 'main'
 
 jobs:
-  trigger-sync:
-    runs-on: ubuntu-latest
+  sync-docs:
+    # Ensure this runner is available and correctly configured
+    runs-on: self-hosted 
     
     steps:
-      - name: Checkout repository
+      - name: Checkout documentation repository (this repo)
         uses: actions/checkout@v4
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          # Use the repository and ref from the payload if dispatched, otherwise use inputs/defaults
+          repository: ${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}
+          ref: ${{ github.event.inputs.source_ref || github.event.client_payload.ref || 'main' }}
+          token: ${{ secrets.SOURCE_REPO_TOKEN }}
+          path: source-repo
           fetch-depth: 2
       
-      - name: Get changed files
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Get changed documentation files
         id: changed-files
+        working-directory: source-repo
         run: |
-          CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD -- documentation/)
-          echo "files<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          
-          # Convert to space-separated for payload
-          CHANGED_FILES_SPACE=$(echo "$CHANGED_FILES" | tr '\n' ' ')
-          echo "files_space=$CHANGED_FILES_SPACE" >> $GITHUB_OUTPUT
-      
-      - name: Trigger documentation repository sync
-        run: |
-          curl -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ secrets.DOCS_REPO_TRIGGER_TOKEN }}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/gcs-sre/obs-suite-tech-docs/dispatches \
-            -d '{
-              "event_type": "docs-updated",
-              "client_payload": {
-                "repository": "${{ github.repository }}",
-                "ref": "${{ github.ref_name }}",
-                "sha": "${{ github.sha }}",
-                "changed_files": "${{ steps.changed-files.outputs.files_space }}",
-                "pusher": "${{ github.actor }}",
-                "commit_message": "${{ github.event.head_commit.message }}"
-              }
-            }'
-      
-      - name: Summary
-        run: |
-          echo "# Documentation Sync Triggered 🚀" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Triggered sync in \`gcs-sre/obs-suite-tech-docs\` for the following files:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "${{ steps.changed-files.outputs.files }}" | while read file; do
-            if [ -n "$file" ]; then
-              echo "- \`$file\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # For manual dispatch, assume all files are potentially changed
+            CHANGED_FILES=$(find documentation -name "*.md" -type f)
+          else
+            if [ -n "${{ github.event.client_payload.changed_files }}" ]; then
+              # Use the space-separated list sent in the payload
+              CHANGED_FILES="${{ github.event.client_payload.changed_files }}"
+              # Remove leading/trailing whitespace if present
+              CHANGED_FILES=$(echo "$CHANGED_FILES" | xargs)
+            else
+              # Fallback if payload is missing files, but should still diff
+              CHANGED_FILES_RAW=$(git diff --name-only HEAD~1 HEAD -- documentation/ || find documentation -name "*.md" -type f)
+              CHANGED_FILES=$(echo "$CHANGED_FILES_RAW" | tr '\n' ' ')
             fi
-          done
+          fi
+          
+          # Convert space-separated list back to newline-separated for output
+          CHANGED_FILES_OUTPUT=$(echo "$CHANGED_FILES" | tr ' ' '\n')
+          
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_FILES_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Changed files: $CHANGED_FILES"
+      
+      - name: Test connection to local LLM
+        env:
+          LOCAL_LLM_URL: ${{ secrets.LOCAL_LLM_URL }}
+        run: |
+          echo "Testing connection to local LLM at: $LOCAL_LLM_URL"
+          
+          # Test Ollama connection
+          if curl -f -s "${LOCAL_LLM_URL}/api/version" > /dev/null 2>&1; then
+            echo "✅ Successfully connected to Ollama"
+            curl -s "${LOCAL_LLM_URL}/api/version"
+          else
+            echo "⚠️ Warning: Cannot connect to local LLM. Will default to syncing all files."
+          fi
+      
+      - name: Analyze changes with Local LLM
+        id: llm-analysis
+        working-directory: source-repo
+        env:
+          LOCAL_LLM_URL: ${{ secrets.LOCAL_LLM_URL }}
+          LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL || 'llama2' }}
+        run: |
+          cat > analyze_docs.js << 'SCRIPT'
+          const fs = require('fs');
+          const path = require('path');
+          const { execSync } = require('child_process');
+
+          const changedFiles = process.env.CHANGED_FILES.split('\n').filter(f => f.trim());
+          const llmUrl = process.env.LOCAL_LLM_URL || 'http://localhost:11434';
+          const llmModel = process.env.LOCAL_LLM_MODEL || 'llama2';
+          
+          async function analyzeWithLocalLLM(filePath, content) {
+            const prompt = `Analyze this documentation change and determine if it's significant enough to sync to the documentation site. Consider:
+          - Is this a meaningful content change or just formatting/typos?
+          - Does it affect user understanding or functionality?
+          - Should this be synced immediately?
+          
+          File: ${filePath}
+          Content preview: ${content.substring(0, 1000)}
+          
+          Respond with ONLY valid JSON: {"should_sync": true, "reason": "brief explanation", "priority": "high"}`;
+
+            try {
+              console.log(`Calling LLM at ${llmUrl} for ${filePath}`);
+              
+              const curlCommand = `curl -s --max-time 30 "${llmUrl}/api/generate" -d '${JSON.stringify({
+                model: llmModel,
+                prompt: prompt,
+                stream: false,
+                options: {
+                  temperature: 0.3,
+                  num_predict: 200
+                }
+              }).replace(/'/g, "'\\''")}'`;
+              
+              const response = execSync(curlCommand, { 
+                encoding: 'utf-8',
+                timeout: 35000
+              });
+              
+              const result = JSON.parse(response);
+              
+              if (!result.response) {
+                throw new Error('No response from LLM');
+              }
+              
+              // Try to parse JSON from response
+              const jsonMatch = result.response.match(/\{[\s\S]*\}/);
+              if (!jsonMatch) {
+                console.warn(`No JSON found in LLM response for ${filePath}`);
+                return { should_sync: true, reason: "Could not parse LLM response", priority: "medium" };
+              }
+              
+              const parsedResponse = JSON.parse(jsonMatch[0]);
+              console.log(`✅ LLM analysis for ${filePath}:`, parsedResponse);
+              return parsedResponse;
+              
+            } catch (error) {
+              console.error(`❌ Error analyzing ${filePath}:`, error.message);
+              return { 
+                should_sync: true, 
+                reason: "Error during LLM analysis, syncing by default", 
+                priority: "medium" 
+              };
+            }
+          }
+
+          async function processFiles() {
+            const results = [];
+            
+            for (const file of changedFiles) {
+              if (!file.endsWith('.md')) continue;
+              
+              const fullPath = path.join(process.cwd(), file);
+              if (!fs.existsSync(fullPath)) {
+                console.log(`File not found: ${fullPath}, skipping`);
+                continue;
+              }
+              
+              const content = fs.readFileSync(fullPath, 'utf-8');
+              const analysis = await analyzeWithLocalLLM(file, content);
+              
+              results.push({
+                file,
+                analysis
+              });
+              
+              console.log(`Analysis for ${file}:`, JSON.stringify(analysis, null, 2));
+            }
+            
+            if (results.length === 0) {
+              console.log('No markdown files to analyze');
+            }
+            
+            fs.writeFileSync('../analysis_results.json', JSON.stringify(results, null, 2));
+          }
+
+          processFiles().catch(error => {
+            console.error('Fatal error:', error);
+            // Create default results file so workflow doesn't fail
+            fs.writeFileSync('../analysis_results.json', JSON.stringify([], null, 2));
+            process.exit(0);
+          });
+          SCRIPT
+          
+          export CHANGED_FILES="${{ steps.changed-files.outputs.files }}"
+          node analyze_docs.js
+      
+      - name: Sync documentation files
+        run: |
+          cat > sync_docs.js << 'SCRIPT'
+          const fs = require('fs');
+          const path = require('path');
+
+          const analysisResults = JSON.parse(fs.readFileSync('analysis_results.json', 'utf-8'));
+          
+          // Mapping configuration from source repo to this repo
+          // FIX: Updated file mapping to include the test file and use full paths
+          const fileMapping = {
+            'octoroute/documentation/ApprovalFlow.md': 'docs/services/octoroute/octoroute-approval-workflow.md',
+            'octoroute/documentation/minikube-test.md': 'docs/services/octoroute/minikube-test.md',
+            // Add other mappings as needed:
+            // 'octoroute/documentation/Configuration.md': 'docs/services/octoroute/octoroute-configuration.md',
+          };
+
+          function transformMarkdown(content, sourceFile, sourceRepo) {
+            const sourceLink = `https://github.com/${sourceRepo}/blob/main/${sourceFile}`;
+            const header = `---
+source: ${sourceLink}
+last_synced: ${new Date().toISOString()}
+automated: true
+---
+
+> **Source:** This documentation is automatically synced from [${sourceFile}](${sourceLink})  
+> **Last Updated:** ${new Date().toISOString().split('T')[0]}
+
+`;
+            return header + content;
+          }
+
+          const sourceRepo = process.env.SOURCE_REPO || 'csie-ruben-test/Octoroute';
+          let syncCount = 0;
+          let skipCount = 0;
+
+          analysisResults.forEach(({ file, analysis }) => {
+            if (!analysis.should_sync) {
+              console.log(`⏭️  Skipping ${file}: ${analysis.reason}`);
+              skipCount++;
+              return;
+            }
+
+            const targetFile = fileMapping[file];
+            if (!targetFile) {
+              console.log(`⚠️  No mapping found for ${file} - please add to fileMapping`);
+              return;
+            }
+
+            try {
+              const sourcePath = path.join('source-repo', file);
+              const content = fs.readFileSync(sourcePath, 'utf-8');
+              const transformedContent = transformMarkdown(content, file, sourceRepo);
+              
+              fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+              fs.writeFileSync(targetFile, transformedContent);
+              
+              console.log(`✅ Synced ${file} -> ${targetFile} (Priority: ${analysis.priority})`);
+              syncCount++;
+            } catch (error) {
+              console.error(`❌ Error syncing ${file}:`, error.message);
+            }
+          });
+
+          console.log(`\n📊 Summary: ${syncCount} files synced, ${skipCount} files skipped`);
+          
+          const summary = {
+            synced: syncCount,
+            skipped: skipCount,
+            details: analysisResults,
+            timestamp: new Date().toISOString(),
+            source_repo: sourceRepo
+          };
+          fs.writeFileSync('sync-summary.json', JSON.stringify(summary, null, 2));
+          SCRIPT
+          
+          # FIX: Export the source repo from the payload for the node script
+          export SOURCE_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}"
+          node sync_docs.js
+      
+      - name: Commit and push changes
+        run: |
+          git config user.name "Documentation Bot"
+          git config user.email "bot@example.com"
+          git add docs/
+          
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          # This requires jq to be installed on the self-hosted runner
+          SUMMARY=$(cat sync-summary.json | jq -r '.details | map("- \(.file): \(.analysis.reason)") | join("\n")')
+          
+          # FIX: Reference the source repo from the payload in the commit message
+          COMMIT_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}"
+          COMMIT_SHA="${{ github.event.client_payload.sha || github.event.inputs.source_ref }}"
+          
+          git commit -m "docs: sync from $COMMIT_REPO
+
+          Source commit: $COMMIT_SHA
+          
+          ${SUMMARY}"
+          
+          git push
