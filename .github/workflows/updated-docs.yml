@@ -1,4 +1,4 @@
-name: Sync Documentation from Octoroute (Local LLM)
+name: Sync Documentation from Octoroute (OpenAI)
 
 on:
   repository_dispatch:
@@ -8,7 +8,7 @@ on:
       source_repo:
         description: 'Source repository (e.g., rubenalejandrocalderoncorona/testing-remote-docs)'
         required: true
-        default: 'csie-ruben-test/Octoroute' # Default for manual dispatch
+        default: 'csie-ruben-test/Octoroute'
       source_ref:
         description: 'Source branch/commit'
         required: true
@@ -16,7 +16,6 @@ on:
 
 jobs:
   sync-docs:
-    # Ensure this runner is available and correctly configured
     runs-on: ubuntu-latest
     
     steps:
@@ -28,7 +27,6 @@ jobs:
       - name: Checkout source repository
         uses: actions/checkout@v4
         with:
-          # Use the repository and ref from the payload if dispatched, otherwise use inputs/defaults
           repository: ${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}
           ref: ${{ github.event.inputs.source_ref || github.event.client_payload.ref || 'main' }}
           token: ${{ secrets.SOURCE_REPO_TOKEN }}
@@ -45,22 +43,17 @@ jobs:
         working-directory: source-repo
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # For manual dispatch, assume all files are potentially changed
-            CHANGED_FILES=$(find documentation -name "*.md" -type f)
+            CHANGED_FILES=$(find documentation -name "*.md" -type f 2>/dev/null || echo "")
           else
             if [ -n "${{ github.event.client_payload.changed_files }}" ]; then
-              # Use the space-separated list sent in the payload
               CHANGED_FILES="${{ github.event.client_payload.changed_files }}"
-              # Remove leading/trailing whitespace if present
               CHANGED_FILES=$(echo "$CHANGED_FILES" | xargs)
             else
-              # Fallback if payload is missing files, but should still diff
-              CHANGED_FILES_RAW=$(git diff --name-only HEAD~1 HEAD -- documentation/ || find documentation -name "*.md" -type f)
+              CHANGED_FILES_RAW=$(git diff --name-only HEAD~1 HEAD -- documentation/ 2>/dev/null || find documentation -name "*.md" -type f 2>/dev/null || echo "")
               CHANGED_FILES=$(echo "$CHANGED_FILES_RAW" | tr '\n' ' ')
             fi
           fi
           
-          # Convert space-separated list back to newline-separated for output
           CHANGED_FILES_OUTPUT=$(echo "$CHANGED_FILES" | tr ' ' '\n')
           
           echo "files<<EOF" >> $GITHUB_OUTPUT
@@ -68,87 +61,106 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
           echo "Changed files: $CHANGED_FILES"
       
-      - name: Test connection to local LLM
-        env:
-          LOCAL_LLM_URL: ${{ secrets.LOCAL_LLM_URL }}
+      - name: Create analysis script
         run: |
-          echo "Testing connection to local LLM at: $LOCAL_LLM_URL"
-          
-          # Test Ollama connection
-          if curl -f -s "${LOCAL_LLM_URL}/api/version" > /dev/null 2>&1; then
-            echo "✅ Successfully connected to Ollama"
-            curl -s "${LOCAL_LLM_URL}/api/version"
-          else
-            echo "⚠️ Warning: Cannot connect to local LLM. Will default to syncing all files."
-          fi
-      
-      - name: Analyze changes with Local LLM
-        id: llm-analysis
-        working-directory: source-repo
-        env:
-          LOCAL_LLM_URL: ${{ secrets.LOCAL_LLM_URL }}
-          LOCAL_LLM_MODEL: ${{ secrets.LOCAL_LLM_MODEL || 'llama2' }}
-        run: |
-          cat > analyze_docs.js << 'SCRIPT'
+          cat > analyze_docs.js << 'EOF'
           const fs = require('fs');
           const path = require('path');
-          const { execSync } = require('child_process');
+          const https = require('https');
 
           const changedFiles = process.env.CHANGED_FILES.split('\n').filter(f => f.trim());
-          const llmUrl = process.env.LOCAL_LLM_URL || 'http://localhost:11434';
-          const llmModel = process.env.LOCAL_LLM_MODEL || 'llama2';
+          const apiKey = process.env.OPENAI_API_KEY;
+          const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
           
-          async function analyzeWithLocalLLM(filePath, content) {
-            const prompt = `Analyze this documentation change and determine if it's significant enough to sync to the documentation site. Consider:
-          - Is this a meaningful content change or just formatting/typos?
-          - Does it affect user understanding or functionality?
-          - Should this be synced immediately?
-          
-          File: ${filePath}
-          Content preview: ${content.substring(0, 1000)}
-          
-          Respond with ONLY valid JSON: {"should_sync": true, "reason": "brief explanation", "priority": "high"}`;
+          if (!apiKey) {
+            console.error('OPENAI_API_KEY is not set');
+            process.exit(1);
+          }
+
+          async function callOpenAI(messages) {
+            return new Promise((resolve, reject) => {
+              const data = JSON.stringify({
+                model: model,
+                messages: messages,
+                temperature: 0.3,
+                max_tokens: 300,
+                response_format: { type: "json_object" }
+              });
+
+              const options = {
+                hostname: 'api.openai.com',
+                port: 443,
+                path: '/v1/chat/completions',
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': 'Bearer ' + apiKey,
+                  'Content-Length': data.length
+                }
+              };
+
+              const req = https.request(options, (res) => {
+                let body = '';
+                
+                res.on('data', (chunk) => {
+                  body += chunk;
+                });
+                
+                res.on('end', () => {
+                  try {
+                    const response = JSON.parse(body);
+                    if (response.error) {
+                      reject(new Error(response.error.message));
+                    } else {
+                      resolve(response);
+                    }
+                  } catch (error) {
+                    reject(new Error('Failed to parse OpenAI response: ' + error.message));
+                  }
+                });
+              });
+
+              req.on('error', (error) => {
+                reject(error);
+              });
+
+              req.write(data);
+              req.end();
+            });
+          }
+
+          async function analyzeWithOpenAI(filePath, content) {
+            const messages = [
+              {
+                role: "system",
+                content: "You are a documentation analyst. Respond ONLY with valid JSON."
+              },
+              {
+                role: "user",
+                content: 'Analyze this documentation change and determine if it is significant enough to sync to the documentation site. Consider: Is this a meaningful content change or just formatting/typos? Does it affect user understanding or functionality? Should this be synced immediately? File: ' + filePath + ' Content preview: ' + content.substring(0, 1500) + ' Respond with ONLY valid JSON in this exact format: {"should_sync": true, "reason": "brief explanation", "priority": "high"}'
+              }
+            ];
 
             try {
-              console.log(`Calling LLM at ${llmUrl} for ${filePath}`);
+              console.log('Calling OpenAI API for ' + filePath + '...');
               
-              const curlCommand = `curl -s --max-time 30 "${llmUrl}/api/generate" -d '${JSON.stringify({
-                model: llmModel,
-                prompt: prompt,
-                stream: false,
-                options: {
-                  temperature: 0.3,
-                  num_predict: 200
-                }
-              }).replace(/'/g, "'\\''")}'`;
+              const response = await callOpenAI(messages);
               
-              const response = execSync(curlCommand, { 
-                encoding: 'utf-8',
-                timeout: 35000
-              });
-              
-              const result = JSON.parse(response);
-              
-              if (!result.response) {
-                throw new Error('No response from LLM');
+              if (!response.choices || !response.choices[0]) {
+                throw new Error('Invalid response structure from OpenAI');
               }
               
-              // Try to parse JSON from response
-              const jsonMatch = result.response.match(/\{[\s\S]*\}/);
-              if (!jsonMatch) {
-                console.warn(`No JSON found in LLM response for ${filePath}`);
-                return { should_sync: true, reason: "Could not parse LLM response", priority: "medium" };
-              }
+              const content = response.choices[0].message.content;
+              const parsedResponse = JSON.parse(content);
               
-              const parsedResponse = JSON.parse(jsonMatch[0]);
-              console.log(`✅ LLM analysis for ${filePath}:`, parsedResponse);
+              console.log('OpenAI analysis for ' + filePath + ':', parsedResponse);
               return parsedResponse;
               
             } catch (error) {
-              console.error(`❌ Error analyzing ${filePath}:`, error.message);
+              console.error('Error analyzing ' + filePath + ':', error.message);
               return { 
                 should_sync: true, 
-                reason: "Error during LLM analysis, syncing by default", 
+                reason: "Error during OpenAI analysis, syncing by default", 
                 priority: "medium" 
               };
             }
@@ -160,70 +172,70 @@ jobs:
             for (const file of changedFiles) {
               if (!file.endsWith('.md')) continue;
               
-              const fullPath = path.join(process.cwd(), file);
+              const fullPath = path.join(process.cwd(), 'source-repo', file);
               if (!fs.existsSync(fullPath)) {
-                console.log(`File not found: ${fullPath}, skipping`);
+                console.log('File not found: ' + fullPath + ', skipping');
                 continue;
               }
               
               const content = fs.readFileSync(fullPath, 'utf-8');
-              const analysis = await analyzeWithLocalLLM(file, content);
+              const analysis = await analyzeWithOpenAI(file, content);
               
               results.push({
                 file,
                 analysis
               });
               
-              console.log(`Analysis for ${file}:`, JSON.stringify(analysis, null, 2));
+              console.log('Analysis for ' + file + ':', JSON.stringify(analysis, null, 2));
             }
             
             if (results.length === 0) {
               console.log('No markdown files to analyze');
             }
             
-            fs.writeFileSync('../analysis_results.json', JSON.stringify(results, null, 2));
+            fs.writeFileSync('analysis_results.json', JSON.stringify(results, null, 2));
           }
 
           processFiles().catch(error => {
             console.error('Fatal error:', error);
-            // Create default results file so workflow doesn't fail
-            fs.writeFileSync('../analysis_results.json', JSON.stringify([], null, 2));
+            fs.writeFileSync('analysis_results.json', JSON.stringify([], null, 2));
             process.exit(0);
           });
-          SCRIPT
-          
-          export CHANGED_FILES="${{ steps.changed-files.outputs.files }}"
-          node analyze_docs.js
+          EOF
       
-      - name: Sync documentation files
+      - name: Analyze changes with OpenAI
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-4o-mini' }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
+        run: node analyze_docs.js
+      
+      - name: Create sync script
         run: |
-          cat > sync_docs.js << 'SCRIPT'
+          cat > sync_docs.js << 'EOF'
           const fs = require('fs');
           const path = require('path');
 
           const analysisResults = JSON.parse(fs.readFileSync('analysis_results.json', 'utf-8'));
           
-          // Mapping configuration from source repo to this repo
-          // FIX: Updated file mapping to include the test file and use full paths
           const fileMapping = {
             'octoroute/documentation/ApprovalFlow.md': 'docs/services/octoroute/octoroute-approval-workflow.md',
             'octoroute/documentation/minikube-test.md': 'docs/services/octoroute/minikube-test.md',
-            // Add other mappings as needed:
-            // 'octoroute/documentation/Configuration.md': 'docs/services/octoroute/octoroute-configuration.md',
           };
 
           function transformMarkdown(content, sourceFile, sourceRepo) {
-            const sourceLink = `https://github.com/${sourceRepo}/blob/main/${sourceFile}`;
-            const header = `---
-source: ${sourceLink}
-last_synced: ${new Date().toISOString()}
-automated: true
----
-
-> **Source:** This documentation is automatically synced from [${sourceFile}](${sourceLink})  
-> **Last Updated:** ${new Date().toISOString().split('T')[0]}
-
-`;
+            const sourceLink = 'https://github.com/' + sourceRepo + '/blob/main/' + sourceFile;
+            const today = new Date().toISOString().split('T')[0];
+            const timestamp = new Date().toISOString();
+            
+            const header = '---\n' +
+              'source: ' + sourceLink + '\n' +
+              'last_synced: ' + timestamp + '\n' +
+              'automated: true\n' +
+              '---\n\n' +
+              '> **Source:** This documentation is automatically synced from [' + sourceFile + '](' + sourceLink + ')  \n' +
+              '> **Last Updated:** ' + today + '\n\n';
+            
             return header + content;
           }
 
@@ -231,16 +243,19 @@ automated: true
           let syncCount = 0;
           let skipCount = 0;
 
-          analysisResults.forEach(({ file, analysis }) => {
+          analysisResults.forEach(function(item) {
+            const file = item.file;
+            const analysis = item.analysis;
+            
             if (!analysis.should_sync) {
-              console.log(`⏭️  Skipping ${file}: ${analysis.reason}`);
+              console.log('Skipping ' + file + ': ' + analysis.reason);
               skipCount++;
               return;
             }
 
             const targetFile = fileMapping[file];
             if (!targetFile) {
-              console.log(`⚠️  No mapping found for ${file} - please add to fileMapping`);
+              console.log('No mapping found for ' + file + ' - please add to fileMapping');
               return;
             }
 
@@ -252,14 +267,14 @@ automated: true
               fs.mkdirSync(path.dirname(targetFile), { recursive: true });
               fs.writeFileSync(targetFile, transformedContent);
               
-              console.log(`✅ Synced ${file} -> ${targetFile} (Priority: ${analysis.priority})`);
+              console.log('Synced ' + file + ' -> ' + targetFile + ' (Priority: ' + analysis.priority + ')');
               syncCount++;
             } catch (error) {
-              console.error(`❌ Error syncing ${file}:`, error.message);
+              console.error('Error syncing ' + file + ':', error.message);
             }
           });
 
-          console.log(`\n📊 Summary: ${syncCount} files synced, ${skipCount} files skipped`);
+          console.log('\nSummary: ' + syncCount + ' files synced, ' + skipCount + ' files skipped');
           
           const summary = {
             synced: syncCount,
@@ -269,11 +284,12 @@ automated: true
             source_repo: sourceRepo
           };
           fs.writeFileSync('sync-summary.json', JSON.stringify(summary, null, 2));
-          SCRIPT
-          
-          # FIX: Export the source repo from the payload for the node script
-          export SOURCE_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}"
-          node sync_docs.js
+          EOF
+      
+      - name: Sync documentation files
+        env:
+          SOURCE_REPO: ${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}
+        run: node sync_docs.js
       
       - name: Commit and push changes
         run: |
@@ -286,10 +302,12 @@ automated: true
             exit 0
           fi
           
-          # This requires jq to be installed on the self-hosted runner
-          SUMMARY=$(cat sync-summary.json | jq -r '.details | map("- \(.file): \(.analysis.reason)") | join("\n")')
+          if command -v jq &> /dev/null; then
+            SUMMARY=$(cat sync-summary.json | jq -r '.details | map("- \(.file): \(.analysis.reason)") | join("\n")')
+          else
+            SUMMARY="See sync-summary.json for details"
+          fi
           
-          # FIX: Reference the source repo from the payload in the commit message
           COMMIT_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}"
           COMMIT_SHA="${{ github.event.client_payload.sha || github.event.inputs.source_ref }}"
           
