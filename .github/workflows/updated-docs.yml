@@ -293,8 +293,8 @@ jobs:
       
       - name: Commit and push changes
         run: |
-          git config user.name "Documentation Bot"
-          git config user.email "bot@example.com"
+          git config user.name "rubenalejandrocalderoncorona"
+          git config user.email "rubenalejandrocalderoncorona@gmail.com"
           git add docs/
           
           if git diff --staged --quiet; then
