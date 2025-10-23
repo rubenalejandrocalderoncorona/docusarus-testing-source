@@ -17,7 +17,7 @@ on:
 jobs:
   sync-docs:
     # Ensure this runner is available and correctly configured
-    runs-on: self-hosted 
+    runs-on: ubuntu-latest
     
     steps:
       - name: Checkout documentation repository (this repo)
