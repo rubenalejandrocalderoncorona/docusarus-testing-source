@@ -226,15 +226,63 @@ jobs:
 
           const analysisResults = JSON.parse(fs.readFileSync('analysis_results.json', 'utf-8'));
           
+          const pathMappings = [
+            {
+              sourcePattern: /^octoroute\/documentation\//,
+              targetBase: 'docs/services/octoroute',
+              sidebarCategory: 'Octoroute',
+              sidebarLabel: 'Octoroute'
+            },
+            {
+              sourcePattern: /^docs\/caas\/procedures\//,
+              targetBase: 'docs/caas/procedures',
+              sidebarCategory: 'CaaS',
+              sidebarLabel: 'CaaS Procedures'
+            },
+            {
+              sourcePattern: /^docs\/services\//,
+              targetBase: 'docs/services',
+              sidebarCategory: 'Services',
+              sidebarLabel: 'Services'
+            },
+            {
+              sourcePattern: /^documentation\//,
+              targetBase: 'docs',
+              sidebarCategory: 'General',
+              sidebarLabel: 'Documentation'
+            }
+          ];
+
           function generateTargetPath(sourceFile) {
-            const parts = sourceFile.split('/');
-            const fileName = parts[parts.length - 1];
-            
-            if (sourceFile.startsWith('octoroute/documentation/')) {
-              return 'docs/services/octoroute/' + fileName;
+            for (const mapping of pathMappings) {
+              if (mapping.sourcePattern.test(sourceFile)) {
+                const fileName = path.basename(sourceFile);
+                const relativePath = sourceFile.replace(mapping.sourcePattern, '');
+                const subDirs = path.dirname(relativePath);
+                
+                if (subDirs && subDirs !== '.') {
+                  return path.join(mapping.targetBase, subDirs, fileName);
+                }
+                return path.join(mapping.targetBase, fileName);
+              }
             }
             
-            return 'docs/' + fileName;
+            return path.join('docs', path.basename(sourceFile));
+          }
+
+          function getCategoryInfo(sourceFile) {
+            for (const mapping of pathMappings) {
+              if (mapping.sourcePattern.test(sourceFile)) {
+                return {
+                  category: mapping.sidebarCategory,
+                  label: mapping.sidebarLabel
+                };
+              }
+            }
+            return {
+              category: 'General',
+              label: 'Documentation'
+            };
           }
 
           function transformMarkdown(content, sourceFile, sourceRepo) {
@@ -257,6 +305,7 @@ jobs:
           let syncCount = 0;
           let skipCount = 0;
           const syncedFiles = [];
+          const categorizedFiles = {};
 
           analysisResults.forEach(function(item) {
             const file = item.file;
@@ -269,6 +318,7 @@ jobs:
             }
 
             const targetFile = generateTargetPath(file);
+            const categoryInfo = getCategoryInfo(file);
 
             try {
               const sourcePath = path.join('source-repo', file);
@@ -278,13 +328,27 @@ jobs:
               fs.mkdirSync(path.dirname(targetFile), { recursive: true });
               fs.writeFileSync(targetFile, transformedContent);
               
-              console.log('Synced ' + file + ' -> ' + targetFile + ' (Priority: ' + analysis.priority + ')');
+              console.log('Synced ' + file + ' -> ' + targetFile + ' (Category: ' + categoryInfo.category + ')');
               syncCount++;
-              syncedFiles.push({
+              
+              const syncInfo = {
                 source: file,
                 target: targetFile,
-                priority: analysis.priority
-              });
+                priority: analysis.priority,
+                category: categoryInfo.category,
+                label: categoryInfo.label
+              };
+              
+              syncedFiles.push(syncInfo);
+              
+              if (!categorizedFiles[categoryInfo.category]) {
+                categorizedFiles[categoryInfo.category] = {
+                  label: categoryInfo.label,
+                  files: []
+                };
+              }
+              categorizedFiles[categoryInfo.category].files.push(syncInfo);
+              
             } catch (error) {
               console.error('Error syncing ' + file + ':', error.message);
             }
@@ -296,6 +360,7 @@ jobs:
             synced: syncCount,
             skipped: skipCount,
             synced_files: syncedFiles,
+            categorized_files: categorizedFiles,
             details: analysisResults,
             timestamp: new Date().toISOString(),
             source_repo: sourceRepo
@@ -309,6 +374,51 @@ jobs:
         run: node sync_docs.js
       
       - name: Update Docusaurus sidebar configuration
+        run: |
+          cat > update_sidebar.js << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+
+          const sidebarPath = 'sidebars.js';
+          
+          if (!fs.existsSync(sidebarPath)) {
+            console.log('sidebars.js not found, skipping sidebar update');
+            process.exit(0);
+          }
+
+          const syncSummary = JSON.parse(fs.readFileSync('sync-summary.json', 'utf-8'));
+          const categorizedFiles = syncSummary.categorized_files || {};
+
+          if (Object.keys(categorizedFiles).length === 0) {
+            console.log('No files synced, skipping sidebar update');
+            process.exit(0);
+          }
+
+          let sidebarContent = fs.readFileSync(sidebarPath, 'utf-8');
+
+          Object.keys(categorizedFiles).forEach(function(categoryKey) {
+            const category = categorizedFiles[categoryKey];
+            const items = category.files.map(function(f) {
+              const docPath = f.target.replace('docs/', '').replace('.md', '');
+              return "      '" + docPath + "',";
+            });
+
+            if (items.length === 0) return;
+
+            console.log('Processing ' + items.length + ' files for category: ' + category.label);
+            
+            const categorySection = 
+              "    {\n" +
+              "      type: 'category',\n" +
+              "      label: '" + category.label + "',\n" +
+              "      items: [\n" +
+              items.join('\n') + '\n' +
+              "      ],\n" +
+              "    },";
+
+            const labelPattern = new RegExp(
+              "\\{\\s*type:\\s*'category',\\s*label:\\s*'" + 
+              category.label.replace(/[.*+?^${}()|[\]\\]/g, '\\      - name: Update Docusaurus sidebar configuration
         run: |
           cat > update_sidebar.js << 'EOF'
           const fs = require('fs');
@@ -346,7 +456,33 @@ jobs:
               "      type: 'category',\n" +
               "      label: 'Octoroute',\n" +
               "      items: [\n" +
-              octorouteItems.join('\n') + '\n' +
+              octorouteItems.join('\n') + '\') + 
+              "',\\s*items:\\s*\\[[^\\]]*\\],?\\s*\\},?",
+              's'
+            );
+
+            if (labelPattern.test(sidebarContent)) {
+              sidebarContent = sidebarContent.replace(labelPattern, categorySection);
+              console.log('Updated existing ' + category.label + ' section');
+            } else {
+              const tutorialSidebarRegex = /(tutorialSidebar:\s*\[)/;
+              if (tutorialSidebarRegex.test(sidebarContent)) {
+                sidebarContent = sidebarContent.replace(
+                  tutorialSidebarRegex,
+                  '$1\n' + categorySection
+                );
+                console.log('Added new ' + category.label + ' section to sidebar');
+              } else {
+                console.log('Could not find insertion point for ' + category.label);
+              }
+            }
+          });
+
+          fs.writeFileSync(sidebarPath, sidebarContent);
+          console.log('Sidebar configuration updated successfully');
+          EOF
+          
+          node update_sidebar.jsn' +
               "      ],\n" +
               "    },";
 
