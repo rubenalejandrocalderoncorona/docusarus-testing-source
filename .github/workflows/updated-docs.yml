@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       source_repo:
-        description: 'Source repository (e.g., rubenalejandrocalderoncorona/testing-remote-docs)'
+        description: 'Source repository'
         required: true
         default: 'csie-ruben-test/Octoroute'
       source_ref:
@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout documentation repository (this repo)
+      - name: Checkout documentation repository
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.DOCS_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
@@ -43,15 +43,16 @@ jobs:
         id: changed-files
         working-directory: source-repo
         run: |
-          # Define documentation paths to watch (space-separated)
           DOC_PATHS="octoroute/documentation docs/caas/procedures docs/services documentation"
+          CHANGED_FILES=""
           
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            CHANGED_FILES=""
             for doc_path in $DOC_PATHS; do
               if [ -d "$doc_path" ]; then
-                FILES=$(find "$doc_path" -name "*.md" -type f 2>/dev/null || echo "")
-                CHANGED_FILES="$CHANGED_FILES $FILES"
+                FILES=$(find "$doc_path" -name "*.md" -type f 2>/dev/null)
+                if [ -n "$FILES" ]; then
+                  CHANGED_FILES="$CHANGED_FILES $FILES"
+                fi
               fi
             done
           else
@@ -59,19 +60,29 @@ jobs:
               CHANGED_FILES="${{ github.event.client_payload.changed_files }}"
               CHANGED_FILES=$(echo "$CHANGED_FILES" | xargs)
             else
-              CHANGED_FILES=""
               for doc_path in $DOC_PATHS; do
-                FILES=$(git diff --name-only HEAD~1 HEAD -- "$doc_path/" 2>/dev/null || echo "")
-                CHANGED_FILES="$CHANGED_FILES $FILES"
+                FILES=$(git diff --name-only HEAD~1 HEAD -- "$doc_path/" 2>/dev/null)
+                if [ -n "$FILES" ]; then
+                  CHANGED_FILES="$CHANGED_FILES $FILES"
+                fi
               done
             fi
           fi
           
-          CHANGED_FILES_OUTPUT=$(echo "$CHANGED_FILES" | tr ' ' '\n' | grep -v '^
+          if [ -z "$CHANGED_FILES" ]; then
+            CHANGED_FILES_OUTPUT=""
+          else
+            CHANGED_FILES_OUTPUT=$(echo "$CHANGED_FILES" | tr ' ' '\n' | sed '/^$/d')
+          fi
+          
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGED_FILES_OUTPUT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Changed files: $CHANGED_FILES_OUTPUT"
       
       - name: Create analysis script
         run: |
-          cat > analyze_docs.js << 'EOF'
+          cat > analyze_docs.js << 'ENDSCRIPT'
           const fs = require('fs');
           const path = require('path');
           const https = require('https');
@@ -209,7 +220,7 @@ jobs:
             fs.writeFileSync('analysis_results.json', JSON.stringify([], null, 2));
             process.exit(0);
           });
-          EOF
+          ENDSCRIPT
       
       - name: Analyze changes with OpenAI
         env:
@@ -220,7 +231,7 @@ jobs:
       
       - name: Create sync script with automatic mapping
         run: |
-          cat > sync_docs.js << 'EOF'
+          cat > sync_docs.js << 'ENDSYNC'
           const fs = require('fs');
           const path = require('path');
 
@@ -366,7 +377,7 @@ jobs:
             source_repo: sourceRepo
           };
           fs.writeFileSync('sync-summary.json', JSON.stringify(summary, null, 2));
-          EOF
+          ENDSYNC
       
       - name: Sync documentation files
         env:
@@ -375,7 +386,7 @@ jobs:
       
       - name: Update Docusaurus sidebar configuration
         run: |
-          cat > update_sidebar.js << 'EOF'
+          cat > update_sidebar.js << 'ENDSIDEBAR'
           const fs = require('fs');
           const path = require('path');
 
@@ -418,45 +429,7 @@ jobs:
 
             const labelPattern = new RegExp(
               "\\{\\s*type:\\s*'category',\\s*label:\\s*'" + 
-              category.label.replace(/[.*+?^${}()|[\]\\]/g, '\\      - name: Update Docusaurus sidebar configuration
-        run: |
-          cat > update_sidebar.js << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-
-          const sidebarPath = 'sidebars.js';
-          
-          if (!fs.existsSync(sidebarPath)) {
-            console.log('sidebars.js not found, skipping sidebar update');
-            process.exit(0);
-          }
-
-          const syncSummary = JSON.parse(fs.readFileSync('sync-summary.json', 'utf-8'));
-          const syncedFiles = syncSummary.synced_files || [];
-
-          if (syncedFiles.length === 0) {
-            console.log('No files synced, skipping sidebar update');
-            process.exit(0);
-          }
-
-          let sidebarContent = fs.readFileSync(sidebarPath, 'utf-8');
-
-          const octorouteItems = syncedFiles
-            .filter(f => f.target.includes('services/octoroute'))
-            .map(f => {
-              const docPath = f.target.replace('docs/', '').replace('.md', '');
-              return "      '" + docPath + "',";
-            });
-
-          if (octorouteItems.length > 0) {
-            console.log('Found ' + octorouteItems.length + ' octoroute files to add to sidebar');
-            
-            const octorouteSection = 
-              "    {\n" +
-              "      type: 'category',\n" +
-              "      label: 'Octoroute',\n" +
-              "      items: [\n" +
-              octorouteItems.join('\n') + '\') + 
+              category.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + 
               "',\\s*items:\\s*\\[[^\\]]*\\],?\\s*\\},?",
               's'
             );
@@ -480,372 +453,7 @@ jobs:
 
           fs.writeFileSync(sidebarPath, sidebarContent);
           console.log('Sidebar configuration updated successfully');
-          EOF
-          
-          node update_sidebar.jsn' +
-              "      ],\n" +
-              "    },";
-
-            if (sidebarContent.includes("label: 'Octoroute'")) {
-              const regex = /\{\s*type:\s*'category',\s*label:\s*'Octoroute',\s*items:\s*\[[^\]]*\],?\s*\},?/s;
-              if (regex.test(sidebarContent)) {
-                sidebarContent = sidebarContent.replace(regex, octorouteSection);
-                console.log('Updated existing Octoroute section');
-              }
-            } else {
-              const tutorialSidebarRegex = /(tutorialSidebar:\s*\[)/;
-              if (tutorialSidebarRegex.test(sidebarContent)) {
-                sidebarContent = sidebarContent.replace(
-                  tutorialSidebarRegex,
-                  '$1\n' + octorouteSection
-                );
-                console.log('Added new Octoroute section to sidebar');
-              }
-            }
-
-            fs.writeFileSync(sidebarPath, sidebarContent);
-            console.log('Sidebar configuration updated successfully');
-          }
-          EOF
-          
-          node update_sidebar.js
-      
-      - name: Commit and push changes
-        run: |
-          git config user.name "Documentation Bot"
-          git config user.email "bot@example.com"
-          git add docs/ sidebars.js
-          
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-          
-          if command -v jq &> /dev/null; then
-            SUMMARY=$(cat sync-summary.json | jq -r '.synced_files | map("- \(.source) -> \(.target)") | join("\n")')
-          else
-            SUMMARY="See sync-summary.json for details"
-          fi
-          
-          COMMIT_REPO="${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}"
-          COMMIT_SHA="${{ github.event.client_payload.sha || github.event.inputs.source_ref }}"
-          
-          git commit -m "docs: sync from $COMMIT_REPO
-
-          Source commit: $COMMIT_SHA
-          
-          ${SUMMARY}"
-          
-          git push
- || echo "")
-          
-          echo "files<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGED_FILES_OUTPUT" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "Changed files: $CHANGED_FILES_OUTPUT"
-      
-      - name: Create analysis script
-        run: |
-          cat > analyze_docs.js << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-          const https = require('https');
-
-          const changedFiles = process.env.CHANGED_FILES.split('\n').filter(f => f.trim());
-          const apiKey = process.env.OPENAI_API_KEY;
-          const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-          
-          if (!apiKey) {
-            console.error('OPENAI_API_KEY is not set');
-            process.exit(1);
-          }
-
-          async function callOpenAI(messages) {
-            return new Promise((resolve, reject) => {
-              const data = JSON.stringify({
-                model: model,
-                messages: messages,
-                temperature: 0.3,
-                max_tokens: 300,
-                response_format: { type: "json_object" }
-              });
-
-              const options = {
-                hostname: 'api.openai.com',
-                port: 443,
-                path: '/v1/chat/completions',
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': 'Bearer ' + apiKey,
-                  'Content-Length': data.length
-                }
-              };
-
-              const req = https.request(options, (res) => {
-                let body = '';
-                
-                res.on('data', (chunk) => {
-                  body += chunk;
-                });
-                
-                res.on('end', () => {
-                  try {
-                    const response = JSON.parse(body);
-                    if (response.error) {
-                      reject(new Error(response.error.message));
-                    } else {
-                      resolve(response);
-                    }
-                  } catch (error) {
-                    reject(new Error('Failed to parse OpenAI response: ' + error.message));
-                  }
-                });
-              });
-
-              req.on('error', (error) => {
-                reject(error);
-              });
-
-              req.write(data);
-              req.end();
-            });
-          }
-
-          async function analyzeWithOpenAI(filePath, content) {
-            const messages = [
-              {
-                role: "system",
-                content: "You are a documentation analyst. Respond ONLY with valid JSON."
-              },
-              {
-                role: "user",
-                content: 'Analyze this documentation change and determine if it is significant enough to sync to the documentation site. Consider: Is this a meaningful content change or just formatting/typos? Does it affect user understanding or functionality? Should this be synced immediately? File: ' + filePath + ' Content preview: ' + content.substring(0, 1500) + ' Respond with ONLY valid JSON in this exact format: {"should_sync": true, "reason": "brief explanation", "priority": "high"}'
-              }
-            ];
-
-            try {
-              console.log('Calling OpenAI API for ' + filePath + '...');
-              
-              const response = await callOpenAI(messages);
-              
-              if (!response.choices || !response.choices[0]) {
-                throw new Error('Invalid response structure from OpenAI');
-              }
-              
-              const content = response.choices[0].message.content;
-              const parsedResponse = JSON.parse(content);
-              
-              console.log('OpenAI analysis for ' + filePath + ':', parsedResponse);
-              return parsedResponse;
-              
-            } catch (error) {
-              console.error('Error analyzing ' + filePath + ':', error.message);
-              return { 
-                should_sync: true, 
-                reason: "Error during OpenAI analysis, syncing by default", 
-                priority: "medium" 
-              };
-            }
-          }
-
-          async function processFiles() {
-            const results = [];
-            
-            for (const file of changedFiles) {
-              if (!file.endsWith('.md')) continue;
-              
-              const fullPath = path.join(process.cwd(), 'source-repo', file);
-              if (!fs.existsSync(fullPath)) {
-                console.log('File not found: ' + fullPath + ', skipping');
-                continue;
-              }
-              
-              const content = fs.readFileSync(fullPath, 'utf-8');
-              const analysis = await analyzeWithOpenAI(file, content);
-              
-              results.push({
-                file,
-                analysis
-              });
-              
-              console.log('Analysis for ' + file + ':', JSON.stringify(analysis, null, 2));
-            }
-            
-            if (results.length === 0) {
-              console.log('No markdown files to analyze');
-            }
-            
-            fs.writeFileSync('analysis_results.json', JSON.stringify(results, null, 2));
-          }
-
-          processFiles().catch(error => {
-            console.error('Fatal error:', error);
-            fs.writeFileSync('analysis_results.json', JSON.stringify([], null, 2));
-            process.exit(0);
-          });
-          EOF
-      
-      - name: Analyze changes with OpenAI
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL || 'gpt-4o-mini' }}
-          CHANGED_FILES: ${{ steps.changed-files.outputs.files }}
-        run: node analyze_docs.js
-      
-      - name: Create sync script with automatic mapping
-        run: |
-          cat > sync_docs.js << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-
-          const analysisResults = JSON.parse(fs.readFileSync('analysis_results.json', 'utf-8'));
-          
-          function generateTargetPath(sourceFile) {
-            const parts = sourceFile.split('/');
-            const fileName = parts[parts.length - 1];
-            
-            if (sourceFile.startsWith('octoroute/documentation/')) {
-              return 'docs/services/octoroute/' + fileName;
-            }
-            
-            return 'docs/' + fileName;
-          }
-
-          function transformMarkdown(content, sourceFile, sourceRepo) {
-            const sourceLink = 'https://github.com/' + sourceRepo + '/blob/main/' + sourceFile;
-            const today = new Date().toISOString().split('T')[0];
-            const timestamp = new Date().toISOString();
-            
-            const header = '---\n' +
-              'source: ' + sourceLink + '\n' +
-              'last_synced: ' + timestamp + '\n' +
-              'automated: true\n' +
-              '---\n\n' +
-              '> **Source:** This documentation is automatically synced from [' + sourceFile + '](' + sourceLink + ')  \n' +
-              '> **Last Updated:** ' + today + '\n\n';
-            
-            return header + content;
-          }
-
-          const sourceRepo = process.env.SOURCE_REPO || 'csie-ruben-test/Octoroute';
-          let syncCount = 0;
-          let skipCount = 0;
-          const syncedFiles = [];
-
-          analysisResults.forEach(function(item) {
-            const file = item.file;
-            const analysis = item.analysis;
-            
-            if (!analysis.should_sync) {
-              console.log('Skipping ' + file + ': ' + analysis.reason);
-              skipCount++;
-              return;
-            }
-
-            const targetFile = generateTargetPath(file);
-
-            try {
-              const sourcePath = path.join('source-repo', file);
-              const content = fs.readFileSync(sourcePath, 'utf-8');
-              const transformedContent = transformMarkdown(content, file, sourceRepo);
-              
-              fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-              fs.writeFileSync(targetFile, transformedContent);
-              
-              console.log('Synced ' + file + ' -> ' + targetFile + ' (Priority: ' + analysis.priority + ')');
-              syncCount++;
-              syncedFiles.push({
-                source: file,
-                target: targetFile,
-                priority: analysis.priority
-              });
-            } catch (error) {
-              console.error('Error syncing ' + file + ':', error.message);
-            }
-          });
-
-          console.log('\nSummary: ' + syncCount + ' files synced, ' + skipCount + ' files skipped');
-          
-          const summary = {
-            synced: syncCount,
-            skipped: skipCount,
-            synced_files: syncedFiles,
-            details: analysisResults,
-            timestamp: new Date().toISOString(),
-            source_repo: sourceRepo
-          };
-          fs.writeFileSync('sync-summary.json', JSON.stringify(summary, null, 2));
-          EOF
-      
-      - name: Sync documentation files
-        env:
-          SOURCE_REPO: ${{ github.event.inputs.source_repo || github.event.client_payload.repository || 'csie-ruben-test/Octoroute' }}
-        run: node sync_docs.js
-      
-      - name: Update Docusaurus sidebar configuration
-        run: |
-          cat > update_sidebar.js << 'EOF'
-          const fs = require('fs');
-          const path = require('path');
-
-          const sidebarPath = 'sidebars.js';
-          
-          if (!fs.existsSync(sidebarPath)) {
-            console.log('sidebars.js not found, skipping sidebar update');
-            process.exit(0);
-          }
-
-          const syncSummary = JSON.parse(fs.readFileSync('sync-summary.json', 'utf-8'));
-          const syncedFiles = syncSummary.synced_files || [];
-
-          if (syncedFiles.length === 0) {
-            console.log('No files synced, skipping sidebar update');
-            process.exit(0);
-          }
-
-          let sidebarContent = fs.readFileSync(sidebarPath, 'utf-8');
-
-          const octorouteItems = syncedFiles
-            .filter(f => f.target.includes('services/octoroute'))
-            .map(f => {
-              const docPath = f.target.replace('docs/', '').replace('.md', '');
-              return "      '" + docPath + "',";
-            });
-
-          if (octorouteItems.length > 0) {
-            console.log('Found ' + octorouteItems.length + ' octoroute files to add to sidebar');
-            
-            const octorouteSection = 
-              "    {\n" +
-              "      type: 'category',\n" +
-              "      label: 'Octoroute',\n" +
-              "      items: [\n" +
-              octorouteItems.join('\n') + '\n' +
-              "      ],\n" +
-              "    },";
-
-            if (sidebarContent.includes("label: 'Octoroute'")) {
-              const regex = /\{\s*type:\s*'category',\s*label:\s*'Octoroute',\s*items:\s*\[[^\]]*\],?\s*\},?/s;
-              if (regex.test(sidebarContent)) {
-                sidebarContent = sidebarContent.replace(regex, octorouteSection);
-                console.log('Updated existing Octoroute section');
-              }
-            } else {
-              const tutorialSidebarRegex = /(tutorialSidebar:\s*\[)/;
-              if (tutorialSidebarRegex.test(sidebarContent)) {
-                sidebarContent = sidebarContent.replace(
-                  tutorialSidebarRegex,
-                  '$1\n' + octorouteSection
-                );
-                console.log('Added new Octoroute section to sidebar');
-              }
-            }
-
-            fs.writeFileSync(sidebarPath, sidebarContent);
-            console.log('Sidebar configuration updated successfully');
-          }
-          EOF
+          ENDSIDEBAR
           
           node update_sidebar.js
       
